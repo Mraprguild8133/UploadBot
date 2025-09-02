@@ -1,7 +1,7 @@
 """
 Cloud storage integration for file upload/download.
 Handles file metadata, user file tracking, and link generation.
-Note: Using local storage as fallback until Mega.nz library compatibility is resolved.
+Uses Telegram channel as primary storage, with local storage as backup.
 """
 
 import asyncio
@@ -19,50 +19,57 @@ from .utils import generate_file_id
 
 logger = logging.getLogger(__name__)
 
-class MegaUploader:
-    """Handles Mega.nz file uploads as additional cloud storage."""
+class TelegramChannelManager:
+    """Handles Telegram channel file uploads as primary storage."""
     
-    def __init__(self, email: str, password: str):
-        self.email = email
-        self.password = password
-        self.mega = None
+    def __init__(self, telethon_client, channel_id):
+        self.telethon_client = telethon_client
+        self.channel_id = channel_id
+        self.initialized = False
         
     async def initialize(self):
-        """Initialize Mega.nz connection."""
+        """Verify Telegram channel connection."""
         try:
-            # Import mega.py here to avoid errors if not installed
-            from mega import Mega
-            
-            mega = Mega()
-            self.mega = mega.login(self.email, self.password)
-            logger.info("Mega.nz connection initialized successfully")
-            return True
+            if self.telethon_client and self.channel_id:
+                # Verify we can access the channel
+                channel_entity = await self.telethon_client.get_entity(self.channel_id)
+                self.initialized = True
+                logger.info("Telegram channel storage initialized successfully")
+                return True
         except Exception as e:
-            logger.warning(f"Mega.nz initialization failed: {e}")
-            return False
+            logger.error(f"Telegram channel initialization failed: {e}")
+            self.initialized = False
+        return False
     
-    async def upload_file(self, file_path: str, filename: str) -> Optional[str]:
-        """Upload file to Mega.nz and return public link."""
-        if not self.mega:
+    async def upload_file(self, file_path: str, caption: str) -> Optional[Tuple[int, str]]:
+        """Upload file to Telegram channel and return message info."""
+        if not self.initialized:
             return None
             
         try:
-            logger.info(f"Uploading {filename} to Mega.nz...")
+            logger.info(f"Uploading {file_path} to Telegram channel...")
             
-            # Upload file to Mega
-            uploaded_file = self.mega.upload(file_path)
+            # Upload to storage channel
+            message = await self.telethon_client.send_file(
+                self.channel_id,
+                file_path,
+                caption=caption,
+                force_document=True  # Ensure files are sent as documents
+            )
             
-            # Get public link
-            public_link = self.mega.get_upload_link(uploaded_file)
+            # Generate public link (format: t.me/c/channel_id/message_id)
+            # Remove the -100 prefix from channel ID for the link
+            channel_link_id = str(self.channel_id).replace('-100', '')
+            channel_link = f"t.me/c/{channel_link_id}/{message.id}"
             
-            logger.info(f"File uploaded to Mega.nz successfully: {public_link}")
-            return public_link
+            logger.info(f"File uploaded to Telegram channel successfully: Message ID {message.id}")
+            return message.id, channel_link
             
         except Exception as e:
-            logger.error(f"Mega.nz upload failed: {e}")
+            logger.error(f"Telegram channel upload failed: {e}")
             return None
 
-class MegaStorageManager:
+class TelegramStorageManager:
     def __init__(self, config):
         self.config = config
         self.compression_manager = CompressionManager(config)
@@ -71,27 +78,27 @@ class MegaStorageManager:
         self.storage_dir = os.path.join(config.TEMP_DIR, 'file_storage')
         os.makedirs(self.storage_dir, exist_ok=True)
         self.telethon_client = None
-        self.mega_uploader = MegaUploader(config.MEGA_EMAIL, config.MEGA_PASSWORD) if config.MEGA_EMAIL and config.MEGA_PASSWORD else None
+        self.channel_manager = None
         
     def set_telethon_client(self, client):
         """Set Telethon client for channel storage."""
         self.telethon_client = client
+        if self.config.STORAGE_CHANNEL_ID:
+            self.channel_manager = TelegramChannelManager(client, self.config.STORAGE_CHANNEL_ID)
         
     async def initialize(self):
         """Initialize storage system."""
         try:
-            # Initialize Mega.nz if configured
-            mega_ready = False
-            if self.mega_uploader:
-                mega_ready = await self.mega_uploader.initialize()
+            # Initialize Telegram channel as primary storage
+            telegram_ready = False
+            if self.channel_manager:
+                telegram_ready = await self.channel_manager.initialize()
             
             # Log storage configuration
             storage_methods = []
-            if self.config.STORAGE_CHANNEL_ID and self.telethon_client:
-                storage_methods.append("Telegram Channel")
-            if mega_ready:
-                storage_methods.append("Mega.nz")
-            storage_methods.append("Local Backup")
+            if telegram_ready:
+                storage_methods.append("Telegram Channel (Primary)")
+            storage_methods.append("Local Storage (Backup)")
             
             logger.info(f"Storage system initialized: {', '.join(storage_methods)}")
             return True
@@ -102,7 +109,7 @@ class MegaStorageManager:
     async def upload_file(self, file_path: str, file_id: str, user_id: int, metadata: Dict) -> str:
         """
         Upload a file to storage and store metadata.
-        Uses Telegram channel for instant access if configured, with local backup.
+        Uses Telegram channel as primary storage, with local backup.
         
         Args:
             file_path: Path to file to upload
@@ -114,43 +121,23 @@ class MegaStorageManager:
             Public download link
         """
         try:
-            # Try uploading to multiple storage locations
             telegram_message_id = None
             channel_link = None
-            mega_link = None
             
-            # Upload to Telegram channel for instant access
-            if self.config.STORAGE_CHANNEL_ID and self.telethon_client:
+            # Try uploading to Telegram channel first (primary)
+            if self.channel_manager and self.channel_manager.initialized:
                 try:
-                    logger.info(f"Uploading {file_path} to Telegram channel for instant access")
+                    caption = f"File ID: {file_id}\nUser: {user_id}\nOriginal: {metadata.get('original_name', 'unknown')}"
                     
-                    # Upload to storage channel
-                    message = await self.telethon_client.send_file(
-                        self.config.STORAGE_CHANNEL_ID,
-                        file_path,
-                        caption=f"File ID: {file_id}\nUser: {user_id}\nOriginal: {metadata.get('original_name', 'unknown')}"
-                    )
-                    
-                    telegram_message_id = message.id
-                    channel_link = f"t.me/c/{str(self.config.STORAGE_CHANNEL_ID)[4:]}/{message.id}"
-                    logger.info(f"File uploaded to Telegram channel successfully: Message ID {telegram_message_id}")
+                    result = await self.channel_manager.upload_file(file_path, caption)
+                    if result:
+                        telegram_message_id, channel_link = result
+                        logger.info(f"File uploaded to Telegram channel successfully: Message ID {telegram_message_id}")
                     
                 except Exception as channel_error:
-                    logger.warning(f"Channel upload failed: {channel_error}")
+                    logger.warning(f"Primary channel upload failed: {channel_error}")
             
-            # Also upload to Mega.nz for cloud backup
-            if self.mega_uploader and self.mega_uploader.mega:
-                try:
-                    mega_link = await self.mega_uploader.upload_file(
-                        file_path, 
-                        metadata.get('original_name', os.path.basename(file_path))
-                    )
-                    if mega_link:
-                        logger.info("File uploaded to Mega.nz successfully")
-                except Exception as mega_error:
-                    logger.warning(f"Mega.nz upload failed: {mega_error}")
-            
-            # Always keep local backup
+            # Always keep local backup regardless of Telegram success
             user_folder = os.path.join(self.storage_dir, f"user_{user_id}")
             os.makedirs(user_folder, exist_ok=True)
             
@@ -158,13 +145,10 @@ class MegaStorageManager:
             logger.info(f"Creating local backup: {stored_file_path}")
             shutil.copy2(file_path, stored_file_path)
             
-            # Determine primary download method (prefer Telegram channel for instant access)
-            if telegram_message_id:
+            # Determine primary download method (prefer Telegram channel)
+            if channel_link:
                 public_link = channel_link
                 storage_type = "telegram_channel"
-            elif mega_link:
-                public_link = mega_link
-                storage_type = "mega_cloud"
             else:
                 public_link = stored_file_path
                 storage_type = "local"
@@ -176,7 +160,6 @@ class MegaStorageManager:
                 'stored_file_path': stored_file_path,
                 'telegram_message_id': telegram_message_id,
                 'channel_link': channel_link,
-                'mega_link': mega_link,
                 'public_link': public_link,
                 'storage_type': storage_type,
                 'upload_date': datetime.now().isoformat(),
@@ -216,13 +199,13 @@ class MegaStorageManager:
             
             compressed_file_path = None
             
-            # Try downloading from Telegram channel first (instant)
+            # Try downloading from Telegram channel first (primary)
             if (file_metadata.get('telegram_message_id') and 
                 self.config.STORAGE_CHANNEL_ID and 
                 self.telethon_client):
                 
                 try:
-                    logger.info(f"Downloading from Telegram channel (instant): Message ID {file_metadata['telegram_message_id']}")
+                    logger.info(f"Downloading from Telegram channel (primary): Message ID {file_metadata['telegram_message_id']}")
                     
                     temp_download_path = os.path.join(
                         self.config.TEMP_DIR, 
@@ -230,22 +213,30 @@ class MegaStorageManager:
                     )
                     
                     # Download from channel
-                    await self.telethon_client.download_media(
-                        await self.telethon_client.get_messages(
-                            self.config.STORAGE_CHANNEL_ID, 
-                            ids=file_metadata['telegram_message_id']
-                        ),
-                        temp_download_path
+                    message = await self.telethon_client.get_messages(
+                        self.config.STORAGE_CHANNEL_ID, 
+                        ids=file_metadata['telegram_message_id']
                     )
                     
-                    compressed_file_path = temp_download_path
-                    logger.info("Downloaded from Telegram channel successfully")
-                    
-                    if progress_callback:
-                        await progress_callback(60)
+                    if message and message.media:
+                        await self.telethon_client.download_media(
+                            message,
+                            temp_download_path
+                        )
+                        
+                        if os.path.exists(temp_download_path):
+                            compressed_file_path = temp_download_path
+                            logger.info("Downloaded from Telegram channel successfully")
+                            
+                            if progress_callback:
+                                await progress_callback(60)
+                        else:
+                            logger.warning("Telegram download failed - file not found after download")
+                    else:
+                        logger.warning("Telegram message or media not found")
                         
                 except Exception as channel_error:
-                    logger.warning(f"Channel download failed, using local backup: {channel_error}")
+                    logger.warning(f"Channel download failed: {channel_error}")
             
             # Fall back to local storage if channel download failed
             if not compressed_file_path:
@@ -265,6 +256,13 @@ class MegaStorageManager:
             
             # Decompress file
             decompressed_path = await self.compression_manager.decompress_file(compressed_file_path)
+            
+            # Clean up temporary download file if we used Telegram channel
+            if compressed_file_path != file_metadata['stored_file_path']:
+                try:
+                    os.remove(compressed_file_path)
+                except:
+                    pass
             
             if progress_callback:
                 await progress_callback(100)
@@ -292,11 +290,12 @@ class MegaStorageManager:
                     'compressed_size': metadata.get('compressed_size', 0),
                     'compression_ratio': metadata.get('compression_ratio', 0),
                     'upload_date': metadata.get('upload_date', 'Unknown'),
-                    'public_link': metadata.get('public_link', '')
+                    'public_link': metadata.get('public_link', ''),
+                    'storage_type': metadata.get('storage_type', 'unknown')
                 })
         
         # Sort by upload date (newest first)
-        user_files.sort(key=lambda x: x['upload_date'], reverse=True)
+        user_files.sort(key=lambda x: x.get('upload_date', ''), reverse=True)
         return user_files
     
     async def delete_file(self, file_id: str, user_id: int) -> bool:
@@ -310,6 +309,21 @@ class MegaStorageManager:
             stored_file_path = file_metadata.get('stored_file_path')
             if stored_file_path and os.path.exists(stored_file_path):
                 os.remove(stored_file_path)
+            
+            # Try to delete from Telegram channel if message ID exists
+            telegram_message_id = file_metadata.get('telegram_message_id')
+            if (telegram_message_id and 
+                self.config.STORAGE_CHANNEL_ID and 
+                self.telethon_client):
+                
+                try:
+                    await self.telethon_client.delete_messages(
+                        self.config.STORAGE_CHANNEL_ID,
+                        [telegram_message_id]
+                    )
+                    logger.info(f"Deleted from Telegram channel: Message ID {telegram_message_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete from Telegram channel: {e}")
             
             # Remove from metadata
             if file_id in self.metadata:
@@ -339,11 +353,27 @@ class MegaStorageManager:
                     except OSError:
                         pass
             
+            # Get Telegram channel info if available
+            telegram_info = {}
+            if self.channel_manager and self.channel_manager.initialized:
+                try:
+                    # This is a simplified approach - in a real implementation
+                    # you might want to count messages in the channel
+                    telegram_info = {
+                        'channel_id': self.config.STORAGE_CHANNEL_ID,
+                        'status': 'connected'
+                    }
+                except:
+                    telegram_info = {'status': 'error_getting_info'}
+            
             return {
-                'storage_type': 'local',
-                'total_files': file_count,
-                'total_size': total_size,
-                'storage_dir': self.storage_dir
+                'local_storage': {
+                    'total_files': file_count,
+                    'total_size': total_size,
+                    'storage_dir': self.storage_dir
+                },
+                'telegram_channel': telegram_info,
+                'total_files_in_metadata': len(self.metadata)
             }
             
         except Exception as e:
