@@ -7,6 +7,8 @@ Supports large file handling, compression, and Mega.nz storage.
 import os
 import asyncio
 import logging
+from aiohttp import web
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telethon import TelegramClient
 from config import Config
@@ -19,27 +21,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Telegram bot token
+# Environment variables
 TOKEN = os.getenv('BOT_TOKEN')
-
-# Webhook URL (must include port 5000)
+API_ID = int(os.getenv('API_ID'))
+API_HASH = os.getenv('API_HASH')
 WEBHOOK_HOST = os.getenv('WEBHOOK_HOST', 'https://yourdomain.com')  # Replace with your domain
 WEBHOOK_PATH = '/webhook'
 WEBHOOK_URL = f"{WEBHOOK_HOST}:{5000}{WEBHOOK_PATH}"
 
-# Instantiate Telethon client (for large file handling)
-API_ID = int(os.getenv('API_ID'))
-API_HASH = os.getenv('API_HASH')
-
-# Initialize bot application
+# Initialize global variables
 application = None
 telethon_client = None
 
 async def start_webhook(request):
     """Handle incoming webhook updates from Telegram."""
     update = await request.json()
-    # Pass to the application for processing
-    update_obj = telegram.Update.de_json(update, application.bot)
+    update_obj = Update.de_json(update, application.bot)
     await application.process_update(update_obj)
     return web.Response()
 
@@ -51,7 +48,7 @@ async def init_app():
     await telethon_client.start(bot_token=TOKEN)
     logger.info("Telethon client started.")
 
-    # Initialize Telegram Application
+    # Initialize Application
     application = Application.builder().token(TOKEN).build()
 
     # Register command handlers
@@ -66,15 +63,16 @@ async def init_app():
     application.add_handler(CommandHandler("delete", bot_handlers.delete_file_command))
     application.add_handler(CommandHandler("compress", bot_handlers.compress_command))
     application.add_handler(CommandHandler("settings", bot_handlers.settings_command))
-    # File upload handler
-    file_filter = filters.Document | filters.Photo | filters.Video | filters.Audio
-    application.add_handler(MessageHandler(file_filter, bot_handlers.handle_file_upload))
+    
+    # Correct filter usage
+    media_filter = filters.PHOTO | filters.DOCUMENT | filters.VIDEO | filters.AUDIO
+    application.add_handler(MessageHandler(media_filter, bot_handlers.handle_file_upload))
 
     # Set webhook
     await application.bot.set_webhook(WEBHOOK_URL)
     logger.info(f"Webhook set to {WEBHOOK_URL}")
 
-    # Set up aiohttp web server
+    # Setup aiohttp server
     app = web.Application()
     app.router.add_post(WEBHOOK_PATH, start_webhook)
     return app
@@ -86,8 +84,8 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', 5000)
     await site.start()
     logger.info("Webhook server listening on port 5000")
+    
     try:
-        # Keep running until interrupted
         while True:
             await asyncio.sleep(3600)
     except KeyboardInterrupt:
