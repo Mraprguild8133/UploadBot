@@ -7,7 +7,6 @@ Supports large file handling, compression, and Mega.nz storage.
 import os
 import asyncio
 import logging
-from aiohttp import web
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telethon import TelegramClient
 from config import Config
