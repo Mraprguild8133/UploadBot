@@ -1,103 +1,102 @@
 #!/usr/bin/env python3
 """
-Telegram Bot with 4GB file handling.
-Supports Telegram Bot API and Telethon (MTProto).
+Telegram Bot supporting only port 5000 for webhook.
+Supports large file handling, compression, and Mega.nz storage.
 """
 
-import logging
 import os
-from typing import Optional, Dict, Any
-
-from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram import Update
-from telegram.request import HTTPXRequest
+import asyncio
+import logging
+from aiohttp import web
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telethon import TelegramClient
+from config import Config
+from bot.handlers import BotHandlers
 
 # Configure logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
+# Telegram bot token
+TOKEN = os.getenv('BOT_TOKEN')
 
-class Config:
-    """Configuration class for the bot."""
+# Webhook URL (must include port 5000)
+WEBHOOK_HOST = os.getenv('WEBHOOK_HOST', 'https://yourdomain.com')  # Replace with your domain
+WEBHOOK_PATH = '/webhook'
+WEBHOOK_URL = f"{WEBHOOK_HOST}:{5000}{WEBHOOK_PATH}"
 
-    def __init__(self):
-        self.BOT_TOKEN = os.getenv("BOT_TOKEN")
-        self.API_ID = int(os.getenv("API_ID", 0))
-        self.API_HASH = os.getenv("API_HASH")
-        self.MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 4GB
+# Instantiate Telethon client (for large file handling)
+API_ID = int(os.getenv('API_ID'))
+API_HASH = os.getenv('API_HASH')
 
-        if not all([self.BOT_TOKEN, self.API_ID, self.API_HASH]):
-            raise ValueError("Missing required environment variables: BOT_TOKEN, API_ID, API_HASH")
+# Initialize bot application
+application = None
+telethon_client = None
 
+async def start_webhook(request):
+    """Handle incoming webhook updates from Telegram."""
+    update = await request.json()
+    # Pass to the application for processing
+    update_obj = telegram.Update.de_json(update, application.bot)
+    await application.process_update(update_obj)
+    return web.Response()
 
-class BotHandlers:
-    """Handlers for Telegram bot commands."""
+async def init_app():
+    global application, telethon_client
 
-    def __init__(self, telethon_client: TelegramClient, config: Config):
-        self.telethon_client = telethon_client
-        self.config = config
-        self.user_sessions: Dict[int, Dict[str, Any]] = {}
+    # Initialize Telethon client
+    telethon_client = TelegramClient('bot_session', API_ID, API_HASH)
+    await telethon_client.start(bot_token=TOKEN)
+    logger.info("Telethon client started.")
 
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        await update.message.reply_text(
-            f"Hi {user.mention_html()} 👋\n\n"
-            "I'm a file handling bot with support for large files up to 4GB.\n"
-            "More features will be added soon!\n\n"
-            "Use /help to see available commands.",
-            parse_mode="HTML",
-        )
+    # Initialize Telegram Application
+    application = Application.builder().token(TOKEN).build()
 
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        help_text = (
-            "📚 <b>Available Commands:</b>\n\n"
-            "/start - Start the bot\n"
-            "/help - Show this help message\n\n"
-            "Send me a file and I'll process it!"
-        )
-        await update.message.reply_text(help_text, parse_mode="HTML")
+    # Register command handlers
+    from bot.handlers import BotHandlers
+    bot_handlers = BotHandlers(application, telethon_client, Config())
 
+    application.add_handler(CommandHandler("start", bot_handlers.start_command))
+    application.add_handler(CommandHandler("help", bot_handlers.help_command))
+    application.add_handler(CommandHandler("upload", bot_handlers.upload_command))
+    application.add_handler(CommandHandler("download", bot_handlers.download_command))
+    application.add_handler(CommandHandler("list", bot_handlers.list_files_command))
+    application.add_handler(CommandHandler("delete", bot_handlers.delete_file_command))
+    application.add_handler(CommandHandler("compress", bot_handlers.compress_command))
+    application.add_handler(CommandHandler("settings", bot_handlers.settings_command))
+    # File upload handler
+    file_filter = filters.Document | filters.Photo | filters.Video | filters.Audio
+    application.add_handler(MessageHandler(file_filter, bot_handlers.handle_file_upload))
 
-class TelegramFileBot:
-    def __init__(self):
-        self.config = Config()
-        self.application: Optional[Application] = None
-        self.telethon_client: Optional[TelegramClient] = None
-        self.bot_handlers: Optional[BotHandlers] = None
+    # Set webhook
+    await application.bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook set to {WEBHOOK_URL}")
 
-    async def initialize(self):
-        # Start Telethon client
-        self.telethon_client = TelegramClient(
-            "bot_session", self.config.API_ID, self.config.API_HASH
-        )
-        await self.telethon_client.start(bot_token=self.config.BOT_TOKEN)
+    # Set up aiohttp web server
+    app = web.Application()
+    app.router.add_post(WEBHOOK_PATH, start_webhook)
+    return app
 
-        # Init Telegram Bot API client
-        request = HTTPXRequest(connection_pool_size=100)
-        self.application = (
-            Application.builder()
-            .token(self.config.BOT_TOKEN)
-            .request(request)
-            .build()
-        )
+async def main():
+    app = await init_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 5000)
+    await site.start()
+    logger.info("Webhook server listening on port 5000")
+    try:
+        # Keep running until interrupted
+        while True:
+            await asyncio.sleep(3600)
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    finally:
+        # Cleanup
+        await application.bot.delete_webhook()
+        await telethon_client.disconnect()
 
-        # Register handlers
-        self.bot_handlers = BotHandlers(self.telethon_client, self.config)
-        self.application.add_handler(CommandHandler("start", self.bot_handlers.start_command))
-        self.application.add_handler(CommandHandler("help", self.bot_handlers.help_command))
-
-    def run(self):
-        # Run inside Application's own loop (no asyncio.run)
-        self.application.run_polling()
-
-
-if __name__ == "__main__":
-    bot = TelegramFileBot()
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(bot.initialize())
-    bot.run()
-    
+if __name__ == '__main__':
+    asyncio.run(main())
