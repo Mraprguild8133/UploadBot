@@ -23,9 +23,6 @@ RUN pip install --no-cache-dir .
 # Copy application code
 COPY . .
 
-# Set permissions
-RUN chmod +x main.py
-
 # Expose port
 EXPOSE 5000
 
