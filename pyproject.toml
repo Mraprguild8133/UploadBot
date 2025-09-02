@@ -11,4 +11,5 @@ dependencies = [
     "telethon>=1.41.0",
     "urllib3>=2.5.0",
     "flask>=3.1.2",
+    "aiohttp>=3.12.15",
 ]
