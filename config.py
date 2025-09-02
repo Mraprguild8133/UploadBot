@@ -1,5 +1,4 @@
 """
-Optional[int]
 Configuration management for the Telegram File Bot.
 Loads settings from environment variables with fallbacks.
 """
@@ -16,7 +15,7 @@ class Config:
     BOT_TOKEN: str
     
     # Telegram MTProto API
-    API_ID: int
+    API_ID: str
     API_HASH: str
     
     # Mega.nz credentials
@@ -24,13 +23,13 @@ class Config:
     MEGA_PASSWORD: str
     
     # Storage settings
-    STORAGE_CHANNEL_ID: str
+    STORAGE_CHANNEL_ID: Optional[int]
     TEMP_DIR: str
     MAX_FILE_SIZE: int
     
     # Compression settings
-    DEFAULT_COMPRESSION: str
-    COMPRESSION_LEVEL: int
+    DEFAULT_COMPRESSION: int
+    COMPRESSION_LEVEL: str
     
     def __init__(self):
         # Required Telegram settings
@@ -60,7 +59,7 @@ class Config:
         except ValueError:
             self.STORAGE_CHANNEL_ID = None
         
-        self.TEMP_DIR = os.getenv("TEMP_DIR", "STORAGE_CHANNEL_ID")
+        self.TEMP_DIR = os.getenv("TEMP_DIR", "./temp")
         
         try:
             self.MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "4294967296"))  # 4GB default
