@@ -41,7 +41,7 @@ class MegaUploader:
             logger.warning(f"Mega.nz initialization failed: {e}")
             return False
     
-    async def upload_file(self, file_path: str, filename: str) -> Optional[str]:
+    async def upload_file(self, file_path: str, filename: str) -> str:
         """Upload file to Mega.nz and return public link."""
         if not self.mega:
             return None
@@ -66,9 +66,9 @@ class MegaStorageManager:
     def __init__(self, config):
         self.config = config
         self.compression_manager = CompressionManager(config)
-        self.metadata_file = os.path.join(config.TEMP_DIR, 'file_metadata.json')
+        self.metadata_file = os.path.join(config.STORAGE_CHANNEL_ID, 'file_metadata.json')
         self.metadata = self._load_metadata()
-        self.storage_dir = os.path.join(config.TEMP_DIR, 'file_storage')
+        self.storage_dir = os.path.join(config.STORAGE_CHANNEL_ID, 'file_storage')
         os.makedirs(self.storage_dir, exist_ok=True)
         self.telethon_client = None
         self.mega_uploader = MegaUploader(config.MEGA_EMAIL, config.MEGA_PASSWORD) if config.MEGA_EMAIL and config.MEGA_PASSWORD else None
@@ -225,7 +225,7 @@ class MegaStorageManager:
                     logger.info(f"Downloading from Telegram channel (instant): Message ID {file_metadata['telegram_message_id']}")
                     
                     temp_download_path = os.path.join(
-                        self.config.TEMP_DIR, 
+                        self.config.STORAGE_CHANNEL_ID, 
                         f"channel_download_{file_id}_{int(time.time())}"
                     )
                     
