@@ -2,16 +2,13 @@
 """
 Telegram Bot with 4GB file handling, compression, and Mega.nz storage integration.
 Supports both Bot API and MTProto for large file transfers.
-Includes web server for health checks and deployment platforms.
+Includes Render.com deployment support with port 5000.
 """
 
 import asyncio
 import logging
 import os
-import signal
-from typing import Optional
-from aiohttp import web
-
+import sys
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telethon import TelegramClient
 from config import Config
@@ -27,13 +24,9 @@ logger = logging.getLogger(__name__)
 class TelegramFileBot:
     def __init__(self):
         self.config = Config()
-        self.bot_handlers: Optional[BotHandlers] = None
-        self.telethon_client: Optional[TelegramClient] = None
-        self.application: Optional[Application] = None
-        self.web_app = None
-        self.runner = None
-        self.site = None
-        self._shutdown_event = asyncio.Event()
+        self.bot_handlers = None
+        self.telethon_client = None
+        self.application = None
         
     async def initialize(self):
         """Initialize the bot with both Bot API and MTProto clients."""
@@ -75,107 +68,93 @@ class TelegramFileBot:
                 self.bot_handlers.handle_file_upload
             ))
             
-            # Initialize web application for health checks
-            self.web_app = web.Application()
-            self.setup_routes()
-            
             logger.info("Bot handlers registered successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize bot: {e}")
             raise
     
-    def setup_routes(self):
-        """Set up routes for the web server."""
-        self.web_app.router.add_get('/', self.health_check)
-        self.web_app.router.add_get('/health', self.health_check)
-    
-    async def health_check(self, request):
-        """Health check endpoint for monitoring."""
-        return web.json_response({
-            'status': 'ok',
-            'bot': 'running',
-            'timestamp': asyncio.get_event_loop().time()
-        })
-    
-    async def run_web_server(self):
-        """Run the web server on port 5000."""
-        try:
-            # Create application runner
-            self.runner = web.AppRunner(self.web_app)
-            await self.runner.setup()
-            
-            # Determine port from environment variable or use default
-            port = int(os.environ.get('PORT', 5000))
-            
-            # Start TCP site
-            self.site = web.TCPSite(self.runner, '0.0.0.0', port)
-            await self.site.start()
-            
-            logger.info(f"Web server started on port {port}")
-            
-        except Exception as e:
-            logger.error(f"Failed to start web server: {e}")
-            raise
-    
-    async def run(self):
-        """Start the bot and web server."""
+    async def run_webhook(self):
+        """Run the bot with webhook for Render deployment."""
         try:
             await self.initialize()
-            logger.info("Starting Telegram File Bot...")
+            logger.info("Starting Telegram File Bot with webhook for Render...")
             
-            # Start the web server
-            await self.run_web_server()
+            # Get the port from environment variable (Render provides this)
+            port = int(os.environ.get('PORT', 5000))
+            webhook_url = os.environ.get('WEBHOOK_URL', '')
             
-            # Start the bot
+            if not webhook_url:
+                logger.error("WEBHOOK_URL environment variable is required for webhook mode")
+                sys.exit(1)
+                
+            # Set up webhook
+            await self.application.bot.set_webhook(
+                url=f"{webhook_url}/{self.config.BOT_TOKEN}",
+                drop_pending_updates=True
+            )
+            
+            # Start the webhook server
+            await self.application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                webhook_url=webhook_url,
+                secret_token='WEBHOOK_SECRET'  # Optional security measure
+            )
+            
+            logger.info(f"Bot is running with webhook on port {port}!")
+            
+        except KeyboardInterrupt:
+            logger.info("Bot stopped by user")
+        except Exception as e:
+            logger.error(f"Bot error: {e}")
+        finally:
+            await self.shutdown()
+    
+    async def run_polling(self):
+        """Run the bot with polling (for local development)."""
+        try:
+            await self.initialize()
+            logger.info("Starting Telegram File Bot with polling...")
+            
+            # Start the bot with polling
             await self.application.initialize()
             await self.application.start()
             await self.application.updater.start_polling()
             
-            logger.info("Bot is running! Press Ctrl+C to stop.")
+            logger.info("Bot is running with polling! Press Ctrl+C to stop.")
             
-            # Set up signal handlers for graceful shutdown
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGTERM, signal.SIGINT):
-                loop.add_signal_handler(
-                    sig, 
-                    lambda: asyncio.create_task(self.shutdown())
-                )
-            
-            # Keep the bot running until shutdown signal
-            await self._shutdown_event.wait()
+            # Keep the bot running
+            while True:
+                await asyncio.sleep(1)
                 
+        except KeyboardInterrupt:
+            logger.info("Bot stopped by user")
         except Exception as e:
             logger.error(f"Bot error: {e}")
+        finally:
             await self.shutdown()
+    
+    async def run(self):
+        """Start the bot in the appropriate mode based on environment."""
+        # Check if we're running on Render (has PORT environment variable)
+        if os.environ.get('PORT'):
+            await self.run_webhook()
+        else:
+            await self.run_polling()
     
     async def shutdown(self):
         """Cleanup and shutdown."""
-        if self._shutdown_event.is_set():
-            return
-            
         logger.info("Shutting down bot...")
-        self._shutdown_event.set()
         
-        try:
-            if self.application:
+        if self.application:
+            if self.application.updater:
                 await self.application.updater.stop()
-                await self.application.stop()
-                await self.application.shutdown()
-        except Exception as e:
-            logger.error(f"Error shutting down bot application: {e}")
+            await self.application.stop()
+            await self.application.shutdown()
         
-        try:
-            if self.telethon_client:
-                await self.telethon_client.disconnect()
-        except Exception as e:
-            logger.error(f"Error disconnecting telethon client: {e}")
-        
-        try:
-            if self.runner:
-                await self.runner.cleanup()
-        except Exception as e:
-            logger.error(f"Error cleaning up web runner: {e}")
+        if self.telethon_client:
+            await self.telethon_client.disconnect()
         
         logger.info("Bot shutdown complete")
 
