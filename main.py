@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
 Telegram Bot with 4GB file handling.
-Supports both Bot API and MTProto for large file transfers.
+Supports Telegram Bot API and Telethon (MTProto).
 """
 
-import asyncio
 import logging
 import os
 from typing import Optional, Dict, Any
 
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram import Update
 from telegram.request import HTTPXRequest
 from telethon import TelegramClient
@@ -36,10 +35,9 @@ class Config:
 
 
 class BotHandlers:
-    """Handlers for Telegram bot commands and messages."""
+    """Handlers for Telegram bot commands."""
 
-    def __init__(self, bot_app: Application, telethon_client: TelegramClient, config: Config):
-        self.bot_app = bot_app
+    def __init__(self, telethon_client: TelegramClient, config: Config):
         self.telethon_client = telethon_client
         self.config = config
         self.user_sessions: Dict[int, Dict[str, Any]] = {}
@@ -73,29 +71,33 @@ class TelegramFileBot:
 
     async def initialize(self):
         # Start Telethon client
-        self.telethon_client = TelegramClient("bot_session", self.config.API_ID, self.config.API_HASH)
+        self.telethon_client = TelegramClient(
+            "bot_session", self.config.API_ID, self.config.API_HASH
+        )
         await self.telethon_client.start(bot_token=self.config.BOT_TOKEN)
 
         # Init Telegram Bot API client
-        request = HTTPXRequest(connection_pool_size=100, read_timeout=30, write_timeout=30, connect_timeout=30)
-        self.application = Application.builder().token(self.config.BOT_TOKEN).request(request).build()
+        request = HTTPXRequest(connection_pool_size=100)
+        self.application = (
+            Application.builder()
+            .token(self.config.BOT_TOKEN)
+            .request(request)
+            .build()
+        )
 
         # Register handlers
-        self.bot_handlers = BotHandlers(self.application, self.telethon_client, self.config)
+        self.bot_handlers = BotHandlers(self.telethon_client, self.config)
         self.application.add_handler(CommandHandler("start", self.bot_handlers.start_command))
         self.application.add_handler(CommandHandler("help", self.bot_handlers.help_command))
 
-    async def run(self):
-        await self.initialize()
-        logger.info("Running bot in polling mode")
-        await self.application.run_polling()
-
-
-async def main():
-    bot = TelegramFileBot()
-    await bot.run()
+    def run(self):
+        # Run inside Application's own loop (no asyncio.run)
+        self.application.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
-        
+    bot = TelegramFileBot()
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(bot.initialize())
+    bot.run()
+    
