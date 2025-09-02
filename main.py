@@ -47,14 +47,18 @@ class Config:
         # Validate required environment variables
         if not all([self.BOT_TOKEN, self.API_ID, self.API_HASH]):
             raise ValueError("Missing required environment variables: BOT_TOKEN, API_ID, API_HASH")
-        
+
+        # Get port from environment (for Render.com deployment)
+    PORT = int(os.environ.get("PORT", 5000))
+    ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
         # Create necessary directories
         Path(self.DOWNLOAD_PATH).mkdir(exist_ok=True)
         Path(self.SESSION_PATH).mkdir(exist_ok=True)
 
 class MegaStorage:
     """Handler for Mega.nz storage operations."""
-    def __init__(self, email: str, password: str):
+    def __init__(self, email: str, pass
+                 word: str):
         self.email = email
         self.password = password
         self.mega = Mega()
