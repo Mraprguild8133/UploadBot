@@ -447,11 +447,62 @@ class TelegramFileBot:
             await self.telethon_client.disconnect()
         
         logger.info("Bot shutdown complete")
+        # Check if running in production (Render.com) or development
+    if ENVIRONMENT == "production":
+        # Production mode: Run health check server alongside polling
+        async def start_production_server():
+            # Create web application for health checks
+            web_app = web.Application()
+            web_app.router.add_get("/health", health_check)
+            web_app.router.add_post("/webhook", webhook_handler)
 
-async def main():
-    """Main entry point."""
-    bot = TelegramFileBot()
-    await bot.run()
+            # Create and start web server for health checks
+            runner = web.AppRunner(web_app)
+            await runner.setup()
+            site = web.TCPSite(runner, "0.0.0.0", PORT)
+            await site.start()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+            logger.info(f"Health check server started on 0.0.0.0:{PORT}")
+            logger.info("Bot running in production mode with polling + health server")
+
+            # Keep the health check server alive
+            try:
+                while True:
+                    await asyncio.sleep(10)
+            except (KeyboardInterrupt, GracefulExit):
+                logger.info("Stopping health check server...")
+            finally:
+                await runner.cleanup()
+
+        # Start health check server in background
+        def run_health_server():
+            asyncio.run(start_production_server())
+
+        # Start health check server in separate thread
+        health_thread = threading.Thread(target=run_health_server)
+        health_thread.daemon = True
+        health_thread.start()
+
+        # Start bot with polling in main thread
+        logger.info("Starting bot polling in production mode")
+        application.run_polling()
+
+
+    else:
+        # Development mode: Use polling + web admin panel
+        import web_server
+        
+        def run_web_server():
+            web_server.app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
+        
+        # Start web server in separate thread
+        web_thread = threading.Thread(target=run_web_server)
+        web_thread.daemon = True
+        web_thread.start()
+        
+        logger.info(f"Web admin panel started on 0.0.0.0:{PORT}")
+        logger.info("Running in development mode with polling")
+        application.run_polling()
+
+if __name__ == '__main__':
+    main()
