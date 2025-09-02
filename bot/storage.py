@@ -68,7 +68,7 @@ class MegaStorageManager:
         self.compression_manager = CompressionManager(config)
         self.metadata_file = os.path.join(config.TEMP_DIR, 'file_metadata.json')
         self.metadata = self._load_metadata()
-        self.storage_dir = os.path.join(config.TEMP_DIR, 'file_storage')
+        self.storage_dir = os.path.join(config.STORAGE_CHANNEL_ID, 'file_storage')
         os.makedirs(self.storage_dir, exist_ok=True)
         self.telethon_client = None
         self.mega_uploader = MegaUploader(config.MEGA_EMAIL, config.MEGA_PASSWORD) if config.MEGA_EMAIL and config.MEGA_PASSWORD else None
@@ -167,7 +167,7 @@ class MegaStorageManager:
                 storage_type = "mega_cloud"
             else:
                 public_link = stored_file_path
-                storage_type = "local"
+                storage_type = "telegram_channel"
             
             # Store metadata with all storage locations
             file_metadata = {
