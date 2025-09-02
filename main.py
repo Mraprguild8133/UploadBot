@@ -9,9 +9,12 @@ import asyncio
 import logging
 import os
 import aiohttp
+import time
 from aiohttp import web
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
-from telethon import TelegramClient
+from telegram.ext import ContextTypes
+from telegram import Update
+from telethon import TelegramClient, errors
 from config import Config
 from bot.handlers import BotHandlers
 
@@ -31,25 +34,107 @@ class TelegramFileBot:
         self.web_app = None
         self.runner = None
         self.site = None
+        self.max_retries = 5
+        self.retry_delay = 10  # seconds
         
-    async def initialize(self):
-        """Initialize the bot with both Bot API and MTProto clients."""
+    async def initialize_telethon(self):
+        """Initialize Telethon client with retry logic."""
+        for attempt in range(self.max_retries):
+            try:
+                logger.info(f"Attempting to initialize Telethon client (attempt {attempt + 1}/{self.max_retries})")
+                
+                self.telethon_client = TelegramClient(
+                    'bot_session',
+                    self.config.API_ID,
+                    self.config.API_HASH,
+                    timeout=30,
+                    connection_retries=3
+                )
+                
+                # Start Telethon client with timeout
+                await asyncio.wait_for(
+                    self.telethon_client.start(bot_token=self.config.BOT_TOKEN),
+                    timeout=30
+                )
+                
+                logger.info("Telethon client initialized successfully")
+                return True
+                
+            except (errors.ConnectionError, asyncio.TimeoutError, errors.RPCError) as e:
+                logger.error(f"Telethon initialization failed (attempt {attempt + 1}): {e}")
+                if attempt < self.max_retries - 1:
+                    logger.info(f"Retrying in {self.retry_delay} seconds...")
+                    await asyncio.sleep(self.retry_delay)
+                else:
+                    logger.error("Max retries exceeded for Telethon initialization")
+                    return False
+            except Exception as e:
+                logger.error(f"Unexpected error during Telethon initialization: {e}")
+                return False
+                
+        return False
+        
+    async def initialize_bot_api(self):
+        """Initialize Bot API application with retry logic."""
+        for attempt in range(self.max_retries):
+            try:
+                logger.info(f"Attempting to initialize Bot API (attempt {attempt + 1}/{self.max_retries})")
+                
+                # Initialize Bot API application with connection pool size
+                self.application = (
+                    Application.builder()
+                    .token(self.config.BOT_TOKEN)
+                    .pool_timeout(30)
+                    .read_timeout(30)
+                    .write_timeout(30)
+                    .build()
+                )
+                
+                # Test connection
+                bot = await self.application.bot.get_me()
+                logger.info(f"Bot API initialized successfully. Bot: @{bot.username}")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Bot API initialization failed (attempt {attempt + 1}): {e}")
+                if attempt < self.max_retries - 1:
+                    logger.info(f"Retrying in {self.retry_delay} seconds...")
+                    await asyncio.sleep(self.retry_delay)
+                else:
+                    logger.error("Max retries exceeded for Bot API initialization")
+                    return False
+                    
+        return False
+        
+    async def initialize_web_server(self):
+        """Initialize web server for port 5000."""
         try:
-            # Initialize Telethon client for large file handling
-            self.telethon_client = TelegramClient(
-                'bot_session',
-                self.config.API_ID,
-                self.config.API_HASH
-            )
-            
-            # Start Telethon client
-            await self.telethon_client.start(bot_token=self.config.BOT_TOKEN)
-            logger.info("Telethon client initialized successfully")
-            
-            # Initialize Bot API application
-            self.application = Application.builder().token(self.config.BOT_TOKEN).build()
-            
-            # Initialize handlers with both clients
+            self.web_app = web.Application()
+            self.web_app.router.add_get('/', self.handle_web_request)
+            self.web_app.router.add_get('/health', self.handle_health_check)
+            logger.info("Web server initialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Web server initialization failed: {e}")
+            return False
+    
+    async def handle_web_request(self, request):
+        """Handle web requests to keep the bot alive on hosting platforms."""
+        return web.Response(text="Bot is running!")
+    
+    async def handle_health_check(self, request):
+        """Health check endpoint for monitoring."""
+        status = {
+            "status": "healthy",
+            "timestamp": time.time(),
+            "telethon_connected": self.telethon_client is not None and self.telethon_client.is_connected(),
+            "bot_api_connected": self.application is not None and self.application.running
+        }
+        return web.json_response(status)
+        
+    async def initialize_handlers(self):
+        """Initialize bot handlers."""
+        try:
             self.bot_handlers = BotHandlers(
                 bot_app=self.application,
                 telethon_client=self.telethon_client,
@@ -72,25 +157,31 @@ class TelegramFileBot:
                 self.bot_handlers.handle_file_upload
             ))
             
-            # Initialize web application for port 5000
-            self.web_app = web.Application()
-            self.web_app.router.add_get('/', self.handle_web_request)
-            
             logger.info("Bot handlers registered successfully")
+            return True
             
         except Exception as e:
-            logger.error(f"Failed to initialize bot: {e}")
-            raise
-    
-    async def handle_web_request(self, request):
-        """Handle web requests to keep the bot alive on hosting platforms."""
-        return web.Response(text="Bot is running!")
+            logger.error(f"Handler initialization failed: {e}")
+            return False
     
     async def run(self):
         """Start the bot with web server on port 5000."""
         try:
-            await self.initialize()
             logger.info("Starting Telegram File Bot...")
+            
+            # Initialize components with retry logic
+            telethon_success = await self.initialize_telethon()
+            bot_api_success = await self.initialize_bot_api()
+            web_server_success = await self.initialize_web_server()
+            
+            if not (telethon_success and bot_api_success):
+                logger.error("Failed to initialize Telegram clients. Exiting.")
+                return
+                
+            # Initialize handlers
+            if not await self.initialize_handlers():
+                logger.error("Failed to initialize handlers. Exiting.")
+                return
             
             # Start the bot
             await self.application.initialize()
@@ -122,12 +213,12 @@ class TelegramFileBot:
         """Cleanup and shutdown."""
         logger.info("Shutting down bot...")
         
-        if self.application:
+        if self.application and self.application.running:
             await self.application.updater.stop()
             await self.application.stop()
             await self.application.shutdown()
         
-        if self.telethon_client:
+        if self.telethon_client and self.telethon_client.is_connected():
             await self.telethon_client.disconnect()
             
         if self.runner:
@@ -141,4 +232,9 @@ async def main():
     await bot.run()
 
 if __name__ == "__main__":
+    # Set event loop policy for Windows compatibility
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
+    # Run the bot
     asyncio.run(main())
