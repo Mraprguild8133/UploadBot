@@ -23,8 +23,8 @@ class Config:
     MEGA_PASSWORD: str
     
     # Storage settings
-    STORAGE_CHANNEL_ID: Optional[int]
-    TEMP_DIR: str
+    STORAGE_CHANNEL_ID: str
+    TEMP_DIR: Optional[int]
     MAX_FILE_SIZE: int
     
     # Compression settings
