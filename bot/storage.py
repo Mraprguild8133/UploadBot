@@ -41,7 +41,7 @@ class MegaUploader:
             logger.warning(f"Mega.nz initialization failed: {e}")
             return False
     
-    async def upload_file(self, file_path: str, filename: str) -> Optional[str]:
+    async def upload_file(self, file_path: str, filename: str):
         """Upload file to Mega.nz and return public link."""
         if not self.mega:
             return None
