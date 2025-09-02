@@ -1,4 +1,5 @@
 """
+Optional[int]
 Configuration management for the Telegram File Bot.
 Loads settings from environment variables with fallbacks.
 """
@@ -24,7 +25,7 @@ class Config:
     
     # Storage settings
     STORAGE_CHANNEL_ID: str
-    TEMP_DIR: Optional[int]
+    TEMP_DIR: str
     MAX_FILE_SIZE: int
     
     # Compression settings
@@ -59,7 +60,7 @@ class Config:
         except ValueError:
             self.STORAGE_CHANNEL_ID = None
         
-        self.TEMP_DIR = os.getenv("TEMP_DIR", "./temp")
+        self.TEMP_DIR = os.getenv("TEMP_DIR", "STORAGE_CHANNEL_ID")
         
         try:
             self.MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "4294967296"))  # 4GB default
