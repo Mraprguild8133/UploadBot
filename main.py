@@ -10,6 +10,8 @@ import logging
 import os
 import aiohttp
 import time
+import json
+import signal
 from aiohttp import web
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telegram.ext import ContextTypes
@@ -36,7 +38,50 @@ class TelegramFileBot:
         self.site = None
         self.max_retries = 5
         self.retry_delay = 10  # seconds
+        self.is_running = False
+        self.lock_file = "bot.lock"
         
+    def check_existing_instance(self):
+        """Check if another bot instance is already running."""
+        if os.path.exists(self.lock_file):
+            try:
+                with open(self.lock_file, 'r') as f:
+                    data = json.load(f)
+                    pid = data.get('pid')
+                    # Check if process with this PID is still running
+                    if pid and self.is_process_running(pid):
+                        logger.error(f"Another bot instance is already running (PID: {pid})")
+                        return True
+            except (json.JSONDecodeError, IOError):
+                pass
+        return False
+    
+    def is_process_running(self, pid):
+        """Check if a process with the given PID is running."""
+        try:
+            os.kill(pid, 0)  # This will raise an exception if process doesn't exist
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+    
+    def create_lock_file(self):
+        """Create a lock file to prevent multiple instances."""
+        try:
+            with open(self.lock_file, 'w') as f:
+                json.dump({'pid': os.getpid(), 'timestamp': time.time()}, f)
+            return True
+        except IOError:
+            logger.error("Failed to create lock file")
+            return False
+    
+    def remove_lock_file(self):
+        """Remove the lock file."""
+        try:
+            if os.path.exists(self.lock_file):
+                os.remove(self.lock_file)
+        except IOError:
+            logger.warning("Failed to remove lock file")
+    
     async def initialize_telethon(self):
         """Initialize Telethon client with retry logic."""
         for attempt in range(self.max_retries):
@@ -166,8 +211,28 @@ class TelegramFileBot:
     
     async def run(self):
         """Start the bot with web server on port 5000."""
+        # Check if another instance is already running
+        if self.check_existing_instance():
+            logger.error("Another bot instance is already running. Exiting.")
+            return
+            
+        # Create lock file to prevent multiple instances
+        if not self.create_lock_file():
+            logger.error("Failed to create lock file. Exiting.")
+            return
+            
+        # Set up signal handlers for graceful shutdown
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
+        except (NotImplementedError, RuntimeError):
+            # Signal handlers not supported on this platform
+            pass
+            
         try:
             logger.info("Starting Telegram File Bot...")
+            self.is_running = True
             
             # Initialize components with retry logic
             telethon_success = await self.initialize_telethon()
@@ -186,7 +251,18 @@ class TelegramFileBot:
             # Start the bot
             await self.application.initialize()
             await self.application.start()
-            await self.application.updater.start_polling()
+            
+            # Use webhook instead of polling if WEBHOOK_URL is set
+            if hasattr(self.config, 'WEBHOOK_URL') and self.config.WEBHOOK_URL:
+                webhook_url = f"{self.config.WEBHOOK_URL}/{self.config.BOT_TOKEN}"
+                await self.application.bot.set_webhook(webhook_url)
+                logger.info(f"Webhook set to: {webhook_url}")
+            else:
+                await self.application.updater.start_polling(
+                    drop_pending_updates=True,  # Avoid processing old updates
+                    allowed_updates=['message', 'callback_query']  # Only listen to specific updates
+                )
+                logger.info("Started polling for updates")
             
             # Start web server on port 5000
             port = int(os.environ.get('PORT', 5000))
@@ -199,8 +275,8 @@ class TelegramFileBot:
             logger.info("Press Ctrl+C to stop.")
             
             # Keep the bot running
-            while True:
-                await asyncio.sleep(3600)  # Sleep for 1 hour
+            while self.is_running:
+                await asyncio.sleep(1)
                 
         except KeyboardInterrupt:
             logger.info("Bot stopped by user")
@@ -211,10 +287,16 @@ class TelegramFileBot:
     
     async def shutdown(self):
         """Cleanup and shutdown."""
+        if not self.is_running:
+            return
+            
+        self.is_running = False
         logger.info("Shutting down bot...")
         
-        if self.application and self.application.running:
+        if self.application and hasattr(self.application, 'updater') and self.application.updater.running:
             await self.application.updater.stop()
+        
+        if self.application and self.application.running:
             await self.application.stop()
             await self.application.shutdown()
         
@@ -224,6 +306,7 @@ class TelegramFileBot:
         if self.runner:
             await self.runner.cleanup()
         
+        self.remove_lock_file()
         logger.info("Bot shutdown complete")
 
 async def main():
